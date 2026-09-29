@@ -401,6 +401,27 @@ describe("runSync", () => {
     expect(existsSync(paths.syncDir)).toBe(false)
   })
 
+  it("an untitled session writes the session-id prefix as the transcript header (V1 label, never a bare \"# \")", async () => {
+    const paths = freshPaths()
+    const toast = fakeToast()
+    let seenContent = ""
+    const deps = fakeDeps({
+      // "ses_untitled" is exactly the first 12 chars of the session id
+      candidates: [{ sessionID: "ses_untitled_extra", directory: "/p/alpha" }],
+      context: { ses_untitled_extra: [msg({ id: "u1" }), msg({ id: "u2", ts: 2000 })] },
+      mine: (wingDir) => {
+        const files = readdirSync(wingDir)
+        seenContent = readFileSync(join(wingDir, files[0]!), "utf8")
+        return Promise.resolve({ ok: true, stdout: "" })
+      },
+    })
+    await runSync(deps, paths, opts(paths, toast.fn))
+
+    expect(seenContent.split("\n")[0]).toBe("# ses_untitled")
+    // the export filename uses the same V1 label fallback
+    expect(seenContent.split("\n")[2]).toBe("Session: ses_untitled_extra")
+  })
+
   it("two sessions in the SAME wing are exported as two files and mined in one mine call", async () => {
     const paths = freshPaths()
     const toast = fakeToast()

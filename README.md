@@ -72,7 +72,7 @@ export { default } from "file:///D:/myprojects/opencode-mempalace/src/index.ts"
 
 ```pwsh
 npm install
-npm test          # vitest（250+ 单测）
+npm test          # vitest（249 单测）
 npm run typecheck
 ```
 

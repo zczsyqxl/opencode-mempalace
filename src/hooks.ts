@@ -6,9 +6,10 @@
  * orchestrates real plugin APIs around these pieces.
  *
  *   - createCheckpointStateMachine: V1 AI-checkpoint cadence. Arming is
- *     bumpCounter's pre-bump rule (state.ts, single source of truth); the
- *     consumer advances `lastCheckpoint` AT ARMING TIME so later messages in
- *     the same boundary cannot re-arm (V1 semantics, state.ts JSDoc).
+ *     bumpCounter's post-bump rule (state.ts, single source of truth); the
+ *     consumer advances `lastCheckpoint` AT ARMING TIME (boundary derived
+ *     from the incremented humanMsgs) so later messages in the same boundary
+ *     cannot re-arm (V1 semantics, state.ts JSDoc).
  *   - createIdentityLatch: identity injected once per plugin lifetime (V1
  *     wakeupDone flag) — see the function doc below.
  *   - createRecallPlanner: one planned recall query at a time; a query
@@ -47,11 +48,12 @@ function memoryStore(): CounterStore {
 
 /**
  * Count human messages per session; on each interval boundary (V1 rule:
- * floor(preBumpMsgs / interval) > lastCheckpoint) arm exactly one pending
- * checkpoint and advance lastCheckpoint immediately. `takePending()` hands
- * the pending checkpoint to the context hook once and clears it; passing a
- * sessionID only takes a pending armed for THAT session (mismatched calls
- * leave the pending intact).
+ * floor(postBumpMsgs / interval) > lastCheckpoint) arm exactly one pending
+ * checkpoint and advance lastCheckpoint immediately (to the boundary of the
+ * incremented humanMsgs). `takePending()` hands the pending checkpoint to
+ * the context hook once and clears it; passing a sessionID only takes a
+ * pending armed for THAT session (mismatched calls leave the pending
+ * intact).
  */
 export function createCheckpointStateMachine(
   interval: number,
@@ -67,7 +69,7 @@ export function createCheckpointStateMachine(
       const counters = store.read()
       const { counter, armed } = bumpCounter(counters[sessionID], interval)
       if (armed) {
-        counter.lastCheckpoint = Math.floor((counter.humanMsgs - 1) / interval)
+        counter.lastCheckpoint = Math.floor(counter.humanMsgs / interval)
         pending = { sessionID, count: counter.humanMsgs }
       }
       store.write({ ...counters, [sessionID]: counter })

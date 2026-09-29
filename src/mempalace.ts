@@ -116,18 +116,23 @@ export function parseDrawers(stdout: string): number {
  * Run the CLI asynchronously (execFile, no shell). Resolves — never rejects —
  * with `{ ok: true, stdout }` or `{ ok: false, error }`; the error string keeps
  * stderr so `classifyMineError` can see lock contention messages.
+ *
+ * `timeoutMs` is OPTIONAL: omitted (or 0) means NO timeout (execFile default)
+ * — V1 ran idle mines unbounded on purpose, because killing the wrapper
+ * orphans the python miner holding the palace lock. Only callers with a real
+ * budget (search, wake-up) pass one.
  */
 export function runMempalace(
   bin: string,
   args: string[],
-  timeoutMs: number,
+  timeoutMs?: number,
   maxBuffer: number = CHILD_MAX_BUFFER,
 ): Promise<MempalaceResult> {
   return new Promise((resolve) => {
     execFile(
       bin,
       args,
-      { timeout: timeoutMs, maxBuffer, encoding: "utf8", windowsHide: true },
+      { timeout: timeoutMs ?? 0, maxBuffer, encoding: "utf8", windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
           const parts = [stderr.trim(), err.message].filter((p) => p !== "")

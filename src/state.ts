@@ -173,12 +173,13 @@ export interface SessionCounter {
 /**
  * Count one more human message and report whether an AI checkpoint is armed.
  *
- * V1 arming rule, evaluated on the counter BEFORE this bump:
- * `armed = floor(humanMsgs / interval) > lastCheckpoint` — so the message
- * that takes a session from 14→15 stays disarmed and the follow-up from
- * {15, 0} arms (exactly one checkpoint per boundary crossing). The returned
- * counter keeps `lastCheckpoint` untouched; the consumer advances it only
- * after the checkpoint instruction was actually delivered.
+ * V1 arming rule, evaluated on the counter AFTER this bump:
+ * `armed = floor(humanMsgs / interval) > lastCheckpoint` — the message that
+ * takes a session from 14→15 arms immediately, so checkpoints fire at
+ * messages 15/30/45 (exactly one per boundary crossing). The returned
+ * counter keeps `lastCheckpoint` untouched; the consumer advances it (to
+ * floor(humanMsgs/interval), the boundary of the incremented count) at
+ * arming time so later messages in the same boundary cannot re-arm.
  *
  * A non-positive `interval` (never produced by config, floor 5) never arms.
  */
@@ -188,7 +189,7 @@ export function bumpCounter(
 ): { counter: SessionCounter; armed: boolean } {
   const prevMsgs = c?.humanMsgs ?? 0
   const lastCheckpoint = c?.lastCheckpoint ?? 0
-  const armed = interval > 0 ? Math.floor(prevMsgs / interval) > lastCheckpoint : false
+  const armed = interval > 0 ? Math.floor((prevMsgs + 1) / interval) > lastCheckpoint : false
   return { counter: { humanMsgs: prevMsgs + 1, lastCheckpoint }, armed }
 }
 

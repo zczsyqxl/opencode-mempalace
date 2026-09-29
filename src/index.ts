@@ -84,8 +84,12 @@ const SEARCH_TIMEOUT_MS = 15_000
 const WAKEUP_TIMEOUT_MS = 15_000
 /** `mempalace status` budget at /memory-status (read-only view; "" on failure). */
 const STATUS_TIMEOUT_MS = 15_000
-/** `mempalace mine` budget per wing (V1 exit-salve value; idle runs are async anyway). */
-const MINE_TIMEOUT_MS = 30_000
+/**
+ * V1 exit-rescue per-wing mine budget (planExitWings). Idle mines run with NO
+ * timeout on purpose — V1 knew that killing the wrapper orphans the python
+ * miner holding the palace lock, so an idle mine must be left to finish.
+ */
+const EXIT_PER_WING_MS = 30_000
 /** V1 exit-rescue total budget across all wings (planExitWings default). */
 const EXIT_BUDGET_MS = 45_000
 /** V1 idle→sync delay: let the round settle before reading the context. */
@@ -138,6 +142,10 @@ export default Plugin.define({
     log.hook(
       `mempalace plugin loaded (saveInterval=${config.saveInterval}, autoInjectContext=${config.autoInjectContext}, toasts=${config.toasts}, bin=${bin ?? "not found"})`,
     )
+    if (bin === null) {
+      // V1 parity: a missing CLI is an ERROR line in hook.log, not just a note.
+      log.err(`mempalace CLI not found (tried MEMPALACE_BIN env, PATH) — search/wake-up/mine disabled`)
+    }
 
     // Package metadata for the startup toast (total: falls back, never throws).
     const pkg = readPackageInfo(PACKAGE_JSON_PATH)
@@ -162,6 +170,12 @@ export default Plugin.define({
 
         const { armed, count } = checkpoints.onPrompt(sessionID)
         log.debug(`prompt ${sessionID}: humanMsgs=${count} armed=${armed}`)
+        if (armed) {
+          // V1 visibility at ARMING time: toast + interactions.log + hook.log.
+          toast("info", "MemPalace", `checkpoint armed (~${count} msgs): the model will file memories now`)
+          log.ilog("checkpoint", { sessionID, count })
+          log.hook(`session ${sessionID}: ${count} human msgs — checkpoint armed`)
+        }
 
         // Register/refresh the session for the discovery chain (Task 10):
         // directory prefers event metadata, then the session record, then the
@@ -208,13 +222,22 @@ export default Plugin.define({
 
         // Recall: one search per planned query; "No results" counts as empty;
         // any failure is swallowed — recall must never break the model call.
+        // V1 visibility: every search lands in the toast + interactions.log
+        // (hit count from "\n [n]" result markers, || 1 for non-empty output
+        // without markers); failure paths stay debug-silent.
         const query = recall.take()
         if (query !== null && bin !== null) {
           try {
+            const startedAt = Date.now()
             const result = await runMempalace(bin, searchArgs(query, MAX_SEARCH_RESULTS), SEARCH_TIMEOUT_MS)
             if (result.ok) {
+              const ms = Date.now() - startedAt
               const memories = result.stdout.trim()
-              if (memories !== "" && !memories.includes("No results")) {
+              const hit = memories !== "" && !memories.includes("No results")
+              const n = hit ? (memories.match(/\n\s*\[\d+\]/g) ?? []).length || 1 : 0
+              toast("info", "MemPalace", `search "${query.slice(0, 50)}" → ${hit ? `${n} result(s)` : "no results"}`)
+              log.ilog("search", { via: "cli", query: query.slice(0, 200), results: n, ms })
+              if (hit) {
                 event.system.push({ type: "text", text: recallBlock(memories.slice(0, MAX_INJECT_CHARS)) })
               }
             } else {
@@ -374,7 +397,9 @@ export default Plugin.define({
           listCandidates: (bf) => collectCandidates(paths, { backfill: bf === true }),
           runMine: async (wingDir, wing) => {
             if (bin === null) return { ok: false, error: "mempalace CLI not found" }
-            return runMempalace(bin, mineArgs(wingDir, wing), MINE_TIMEOUT_MS)
+            // NO timeout (V1): an idle mine runs to completion — killing the
+            // wrapper would orphan the python miner holding the palace lock.
+            return runMempalace(bin, mineArgs(wingDir, wing))
           },
           now: () => Date.now(),
         },
@@ -426,7 +451,7 @@ export default Plugin.define({
             now: () => Date.now(),
           },
           paths,
-          { loggers: log, budgetMs: EXIT_BUDGET_MS, perWingMs: MINE_TIMEOUT_MS },
+          { loggers: log, budgetMs: EXIT_BUDGET_MS, perWingMs: EXIT_PER_WING_MS },
         )
       } catch (err) {
         log.err(`exit save failed: ${String(err)}`)

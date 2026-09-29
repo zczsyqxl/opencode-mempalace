@@ -55,7 +55,7 @@ function recordingStore(seed: Record<string, SessionCounter> = {}): CounterStore
 }
 
 describe("createCheckpointStateMachine", () => {
-  it("arms exactly at each interval boundary: 15 prompts silent, 16th arms, 17–30 silent, 31st arms", () => {
+  it("arms exactly at each interval boundary: 15th and 30th prompts arm, 14/16/29 stay silent", () => {
     const machine = createCheckpointStateMachine(15)
     const armedAt: number[] = []
     for (let i = 1; i <= 31; i++) {
@@ -63,49 +63,49 @@ describe("createCheckpointStateMachine", () => {
       expect(r.count).toBe(i)
       if (r.armed) armedAt.push(i)
     }
-    expect(armedAt).toEqual([16, 31])
+    expect(armedAt).toEqual([15, 30])
   })
 
   it("takePending returns the armed checkpoint once, then null (cleared)", () => {
     const machine = createCheckpointStateMachine(15)
-    for (let i = 1; i <= 16; i++) machine.onPrompt("s1")
-    expect(machine.takePending()).toEqual({ sessionID: "s1", count: 16 })
+    for (let i = 1; i <= 15; i++) machine.onPrompt("s1")
+    expect(machine.takePending()).toEqual({ sessionID: "s1", count: 15 })
     expect(machine.takePending()).toBeNull()
   })
 
   it("advances lastCheckpoint at arming time (V1 semantics) via the injected store", () => {
     const store = recordingStore()
     const machine = createCheckpointStateMachine(15, store)
-    for (let i = 1; i <= 15; i++) machine.onPrompt("s1")
-    expect(store.snapshot()["s1"]).toEqual({ humanMsgs: 15, lastCheckpoint: 0 })
+    for (let i = 1; i <= 14; i++) machine.onPrompt("s1")
+    expect(store.snapshot()["s1"]).toEqual({ humanMsgs: 14, lastCheckpoint: 0 })
 
-    const r = machine.onPrompt("s1") // arms; boundary floor(15/15)=1 must be recorded NOW
+    const r = machine.onPrompt("s1") // 15th arms; boundary floor(15/15)=1 must be recorded NOW
     expect(r.armed).toBe(true)
-    expect(store.snapshot()["s1"]).toEqual({ humanMsgs: 16, lastCheckpoint: 1 })
+    expect(store.snapshot()["s1"]).toEqual({ humanMsgs: 15, lastCheckpoint: 1 })
 
-    machine.onPrompt("s1") // 17: would re-arm if lastCheckpoint had not advanced
-    expect(store.snapshot()["s1"]).toEqual({ humanMsgs: 17, lastCheckpoint: 1 })
+    machine.onPrompt("s1") // 16: would re-arm if lastCheckpoint had not advanced
+    expect(store.snapshot()["s1"]).toEqual({ humanMsgs: 16, lastCheckpoint: 1 })
   })
 
-  it("continues from persisted counters: seeded {15, 0} arms on the first prompt", () => {
-    const store = recordingStore({ old: { humanMsgs: 15, lastCheckpoint: 0 } })
+  it("continues from persisted counters: seeded {14, 0} arms on the first prompt", () => {
+    const store = recordingStore({ old: { humanMsgs: 14, lastCheckpoint: 0 } })
     const machine = createCheckpointStateMachine(15, store)
-    expect(machine.onPrompt("old")).toEqual({ armed: true, count: 16 })
+    expect(machine.onPrompt("old")).toEqual({ armed: true, count: 15 })
   })
 
   it("counts sessions independently", () => {
     const machine = createCheckpointStateMachine(15)
-    for (let i = 1; i <= 16; i++) machine.onPrompt("a")
-    for (let i = 1; i <= 15; i++) expect(machine.onPrompt("b").armed).toBe(false)
+    for (let i = 1; i <= 15; i++) machine.onPrompt("a")
+    for (let i = 1; i <= 14; i++) expect(machine.onPrompt("b").armed).toBe(false)
     expect(machine.onPrompt("b").armed).toBe(true)
-    expect(machine.takePending("b")).toEqual({ sessionID: "b", count: 16 })
+    expect(machine.takePending("b")).toEqual({ sessionID: "b", count: 15 })
   })
 
   it("takePending(sessionID) does not steal another session's pending checkpoint", () => {
     const machine = createCheckpointStateMachine(15)
-    for (let i = 1; i <= 16; i++) machine.onPrompt("a")
+    for (let i = 1; i <= 15; i++) machine.onPrompt("a")
     expect(machine.takePending("b")).toBeNull() // mismatch: leave the pending intact
-    expect(machine.takePending("a")).toEqual({ sessionID: "a", count: 16 })
+    expect(machine.takePending("a")).toEqual({ sessionID: "a", count: 15 })
   })
 
   it("a non-positive interval never arms but still counts", () => {

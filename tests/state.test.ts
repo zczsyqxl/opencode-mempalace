@@ -268,26 +268,28 @@ describe("bumpCounter", () => {
     })
   })
 
-  it("brief examples: from {15,0} armed, from {14,0} not (V1 boundary)", () => {
-    expect(bumpCounter({ humanMsgs: 15, lastCheckpoint: 0 }, 15).armed).toBe(true)
-    expect(bumpCounter({ humanMsgs: 14, lastCheckpoint: 0 }, 15).armed).toBe(false)
+  it("brief examples: from {14,0} armed (the 15th message), from {13,0} not (V1 boundary)", () => {
+    expect(bumpCounter({ humanMsgs: 14, lastCheckpoint: 0 }, 15).armed).toBe(true)
+    expect(bumpCounter({ humanMsgs: 13, lastCheckpoint: 0 }, 15).armed).toBe(false)
   })
 
   it("fires exactly once per boundary crossing", () => {
-    // 15th message: counter {14,0} → {15,0}, still unarmed…
-    expect(bumpCounter({ humanMsgs: 14, lastCheckpoint: 0 }, 15).armed).toBe(false)
-    // …16th message sees the crossed boundary (floor(15/15)=1 > 0) and arms;
-    // the consumer then persists lastCheckpoint = floor(16/15) = 1.
-    expect(bumpCounter({ humanMsgs: 15, lastCheckpoint: 0 }, 15).armed).toBe(true)
+    // 15th message: counter {14,0} → post-bump floor(15/15)=1 > 0 arms NOW…
+    expect(bumpCounter({ humanMsgs: 14, lastCheckpoint: 0 }, 15).armed).toBe(true)
+    // …the consumer records lastCheckpoint = floor(15/15) = 1 at arming time,
+    // so the 16th ({15,1}) and every message up to the 29th ({28,1}) stay
+    // disarmed.
+    expect(bumpCounter({ humanMsgs: 15, lastCheckpoint: 1 }, 15).armed).toBe(false)
     expect(bumpCounter({ humanMsgs: 16, lastCheckpoint: 1 }, 15).armed).toBe(false)
-    expect(bumpCounter({ humanMsgs: 29, lastCheckpoint: 1 }, 15).armed).toBe(false)
+    expect(bumpCounter({ humanMsgs: 28, lastCheckpoint: 1 }, 15).armed).toBe(false)
     // Next boundary (floor(30/15)=2 > 1) arms again — once.
-    expect(bumpCounter({ humanMsgs: 30, lastCheckpoint: 1 }, 15).armed).toBe(true)
+    expect(bumpCounter({ humanMsgs: 29, lastCheckpoint: 1 }, 15).armed).toBe(true)
+    expect(bumpCounter({ humanMsgs: 30, lastCheckpoint: 2 }, 15).armed).toBe(false)
   })
 
   it("honours non-default intervals", () => {
-    expect(bumpCounter({ humanMsgs: 4, lastCheckpoint: 0 }, 5).armed).toBe(false)
-    expect(bumpCounter({ humanMsgs: 5, lastCheckpoint: 0 }, 5).armed).toBe(true)
+    expect(bumpCounter({ humanMsgs: 3, lastCheckpoint: 0 }, 5).armed).toBe(false)
+    expect(bumpCounter({ humanMsgs: 4, lastCheckpoint: 0 }, 5).armed).toBe(true)
     expect(bumpCounter({ humanMsgs: 5, lastCheckpoint: 1 }, 5).armed).toBe(false)
   })
 })

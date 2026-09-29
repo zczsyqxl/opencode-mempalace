@@ -253,12 +253,15 @@ async function syncOnce(deps: SyncDeps, paths: Paths, opts: SyncOpts, startNowMs
     // in flight is not worth a transcript — no file, no cursor movement.
     if (exportable.length < 2 && incompleteTs.length === 0) continue
 
+    // V1 header label: the title verbatim when present, else the sanitized
+    // title, else the first 12 chars of the session id — never a bare "# ".
     const title = candidate.title ?? ""
-    const content = buildTranscript(title, candidate.sessionID, exportable, new Date(startNowMs))
+    const label = title.replace(/[^a-zA-Z0-9 _-]/g, "_") || candidate.sessionID.slice(0, 12)
+    const content = buildTranscript(title || label, candidate.sessionID, exportable, new Date(startNowMs))
     const file = join(plan.wingDir, exportFileName(new Date(startNowMs), title, candidate.sessionID, content))
     try {
-      mkdirSync(plan.wingDir, { recursive: true })
-      // 0600 is a no-op on Windows but kept for posix parity with V1 (0700 dir).
+      mkdirSync(plan.wingDir, { recursive: true, mode: 0o700 })
+      // 0600/0700 are no-ops on Windows but kept for posix parity with V1.
       writeFileSync(file, content + "\n", { mode: 0o600 })
     } catch (err) {
       log.err(`export write failed (${candidate.sessionID}): ${String(err)}`)
