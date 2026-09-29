@@ -103,9 +103,26 @@ function parseInteractionEntry(line: string): InteractionEntry | null {
   return { ts: obj.ts, kind: obj.kind, fields }
 }
 
-/** `"2026-09-29T01:02:03.456Z"` → `"01:02:03"` (ts is always UTC ISO from ilog). */
+/**
+ * Format a timestamp in LOCAL time (storage stays UTC ISO; only display
+ * converts). `offsetMinutes` is the injectable timezone offset for tests,
+ * mirroring `Date.prototype.getTimezoneOffset()` semantics (UTC+8 → -480).
+ */
+export function formatLocalTime(ms: number, offsetMinutes: number = new Date().getTimezoneOffset()): string {
+  // getTimezoneOffset() = UTC - local (UTC+8 → -480), so local = UTC - offset.
+  const shifted = new Date(ms - offsetMinutes * 60_000)
+  return shifted.toISOString().slice(11, 19)
+}
+
+/** Same conversion for full datetimes: `YYYY-MM-DD HH:MM:SS` in local time. */
+export function formatLocalDateTime(ms: number, offsetMinutes: number = new Date().getTimezoneOffset()): string {
+  const shifted = new Date(ms - offsetMinutes * 60_000)
+  return shifted.toISOString().slice(0, 19).replace("T", " ")
+}
+
+/** `"2026-09-29T01:02:03.456Z"` → local `"01:02:03"` (ts is always UTC ISO from ilog). */
 function timeOfDay(ts: string): string {
-  return new Date(ts).toISOString().slice(11, 19)
+  return formatLocalTime(new Date(ts).getTime())
 }
 
 /** Compact `key=value` pairs, spaces between; strings single-lined, the rest JSON. */
@@ -179,18 +196,19 @@ export function renderMemoryStatus(input: MemoryStatusInput): string {
 
   const wingCursorValues = Object.values(st.wings).filter((v) => typeof v === "number")
   const newestSync = wingCursorValues.length > 0 ? Math.max(...wingCursorValues) : 0
-  const iso = (ms: number): string => (ms > 0 ? new Date(ms).toISOString() : "never")
+  const local = (ms: number): string => (ms > 0 ? formatLocalDateTime(ms) : "never")
 
   push("## MemPalace Status", "")
-  push(`- Last sync (newest wing): ${iso(newestSync)}`)
-  push(`- Dedup watermark (oldest wing): ${iso(st.last_sync_ms)}`)
+  push("_times shown in your local timezone (logs on disk stay UTC)_", "")
+  push(`- Last sync (newest wing): ${local(newestSync)}`)
+  push(`- Dedup watermark (oldest wing): ${local(st.last_sync_ms)}`)
   push(`- Mined messages: ${Object.keys(st.mined_ids).length}`)
   push(`- Pending export files: ${input.pendingFiles}`)
 
   push("", "**Wing cursors**")
   const wings = Object.entries(st.wings).sort(([a], [b]) => a.localeCompare(b))
   if (wings.length === 0) push("- (no wings synced yet)")
-  for (const [wing, ts] of wings) push(`- ${wing}: ${new Date(ts).toISOString()}`)
+  for (const [wing, ts] of wings) push(`- ${wing}: ${formatLocalDateTime(ts)}`)
 
   push("", "**Recent mine log**")
   if (input.lastMineLog.length === 0) push("_no mine log yet_")

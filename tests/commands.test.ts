@@ -7,6 +7,8 @@ import {
   MINE_LOG_TAIL_LINES,
   commandArgs,
   countPendingFiles,
+  formatLocalDateTime,
+  formatLocalTime,
   parseMemoryLogArgs,
   readLastLines,
   readLines,
@@ -90,6 +92,11 @@ function iline(ts: string, kind: string, data: Record<string, unknown> = {}): st
   return JSON.stringify({ ts, kind, ...data })
 }
 
+/** Expected display clock for a UTC ISO ts on THIS machine (property-pinning: matches whatever local timezone runs the suite). */
+function localClock(ts: string): string {
+  return formatLocalTime(new Date(ts).getTime())
+}
+
 describe("renderMemoryLog", () => {
   const THREE = [
     iline("2026-09-29T01:00:01.000Z", "mine", { wing: "alpha" }),
@@ -101,24 +108,24 @@ describe("renderMemoryLog", () => {
     const out = renderMemoryLog(THREE, 2)
     const lines = out.split("\n")
     expect(lines).toHaveLength(2)
-    expect(lines[0]).toContain("01:00:02")
+    expect(lines[0]).toContain(localClock("2026-09-29T01:00:02.000Z"))
     expect(lines[0]).toContain("search")
-    expect(lines[1]).toContain("01:00:03")
+    expect(lines[1]).toContain(localClock("2026-09-29T01:00:03.000Z"))
     expect(lines[1]).toContain("mine")
   })
 
   it("one line per entry: [HH:MM:SS] kind — compact k=v fields (ts/kind excluded)", () => {
     const out = renderMemoryLog([iline("2026-09-29T01:02:03.456Z", "search", { query: "wing naming", results: 3 })], 20)
-    expect(out).toBe("[01:02:03] search — query=wing naming results=3")
+    expect(out).toBe(`[${localClock("2026-09-29T01:02:03.456Z")}] search — query=wing naming results=3`)
   })
 
   it("entry without extra fields renders without a trailing separator", () => {
-    expect(renderMemoryLog([iline("2026-09-29T01:02:03.000Z", "mine")], 20)).toBe("[01:02:03] mine")
+    expect(renderMemoryLog([iline("2026-09-29T01:02:03.000Z", "mine")], 20)).toBe(`[${localClock("2026-09-29T01:02:03.000Z")}] mine`)
   })
 
   it("non-string field values render as JSON", () => {
     const out = renderMemoryLog([iline("2026-09-29T01:02:03.000Z", "tool", { input: { a: 1 }, ok: true })], 20)
-    expect(out).toBe('[01:02:03] tool — input={"a":1} ok=true')
+    expect(out).toBe(`[${localClock("2026-09-29T01:02:03.000Z")}] tool — input={"a":1} ok=true`)
   })
 
   it("filter matches kind as a case-insensitive substring", () => {
@@ -138,7 +145,7 @@ describe("renderMemoryLog", () => {
       JSON.stringify({ ts: "yesterday", kind: "mine" }), // unparsable ts
       iline("2026-09-29T01:00:02.000Z", "mine"),
     ]
-    expect(renderMemoryLog(lines, 20)).toBe("[01:00:02] mine")
+    expect(renderMemoryLog(lines, 20)).toBe(`[${localClock("2026-09-29T01:00:02.000Z")}] mine`)
   })
 
   it("empty log → friendly no-entries message", () => {
@@ -173,10 +180,10 @@ describe("renderMemoryStatus", () => {
       palaceStatus: "",
     })
     // newest wing cursor (alpha) drives "last sync"; last_sync_ms (min across wings) drives the watermark
-    expect(out).toContain("- Last sync (newest wing): 2026-09-29T01:02:03.000Z")
-    expect(out).toContain("- Dedup watermark (oldest wing): 2026-09-29T01:02:03.000Z")
-    expect(out).toContain("- alpha: 2026-09-29T01:02:03.000Z")
-    expect(out).toContain("- beta: 2026-09-28T09:00:00.000Z")
+    expect(out).toContain(`- Last sync (newest wing): ${formatLocalDateTime(Date.UTC(2026, 8, 29, 1, 2, 3))}`)
+    expect(out).toContain(`- Dedup watermark (oldest wing): ${formatLocalDateTime(Date.UTC(2026, 8, 29, 1, 2, 3))}`)
+    expect(out).toContain(`- alpha: ${formatLocalDateTime(Date.UTC(2026, 8, 29, 1, 2, 3))}`)
+    expect(out).toContain(`- beta: ${formatLocalDateTime(Date.UTC(2026, 8, 28, 9, 0, 0))}`)
     expect(out).toContain("Mined messages: 3")
     expect(out).toContain("Pending export files: 2")
   })
@@ -192,8 +199,23 @@ describe("renderMemoryStatus", () => {
       lastMineLog: [],
       palaceStatus: "",
     })
-    expect(out).toContain("- Last sync (newest wing): 2026-09-29T12:00:00.000Z")
-    expect(out).toContain("- Dedup watermark (oldest wing): 2026-09-28T09:00:00.000Z")
+    expect(out).toContain(`- Last sync (newest wing): ${formatLocalDateTime(Date.UTC(2026, 8, 29, 12, 0, 0))}`)
+    expect(out).toContain(`- Dedup watermark (oldest wing): ${formatLocalDateTime(Date.UTC(2026, 8, 28, 9, 0, 0))}`)
+  })
+
+  it("notes that displayed times are local", () => {
+    const out = renderMemoryStatus({ pendingFiles: 0, syncState: SYNC_STATE, lastMineLog: [], palaceStatus: "" })
+    expect(out).toContain("local timezone")
+  })
+
+  it("local-time helpers convert with injectable offsets, incl. day rollover", () => {
+    // UTC 2026-09-29T20:00:00Z + UTC+8 (offset -480) → 2026-09-30 04:00 local (next day)
+    expect(formatLocalTime(Date.UTC(2026, 8, 29, 20, 0, 0), -480)).toBe("04:00:00")
+    expect(formatLocalDateTime(Date.UTC(2026, 8, 29, 20, 0, 0), -480)).toBe("2026-09-30 04:00:00")
+    // UTC 2026-09-29T02:00:00Z in UTC-5 (offset +300) → 2026-09-28 21:00 local (previous day)
+    expect(formatLocalDateTime(Date.UTC(2026, 8, 29, 2, 0, 0), 300)).toBe("2026-09-28 21:00:00")
+    // zero offset keeps UTC verbatim
+    expect(formatLocalDateTime(Date.UTC(2026, 8, 29, 1, 2, 3), 0)).toBe("2026-09-29 01:02:03")
   })
 
   it("includes the mine-log tail and the mempalace status output verbatim", () => {
