@@ -51,15 +51,22 @@ describe("wingFor", () => {
 })
 
 describe("buildTranscript", () => {
+  const EXPORT_NOW = new Date("2026-09-30T05:06:07Z")
+
   it("renders the V1-verbatim header + per-message blocks, line by line", () => {
-    const out = buildTranscript("Test Title", "ses_xyz", [
-      msg({ id: "m1", role: "user", text: "hello", ts: T1 }),
-      msg({ id: "m2", role: "assistant", text: "hi\nthere", ts: T2, complete: false }),
-    ])
+    const out = buildTranscript(
+      "Test Title",
+      "ses_xyz",
+      [
+        msg({ id: "m1", role: "user", text: "hello", ts: T1 }),
+        msg({ id: "m2", role: "assistant", text: "hi\nthere", ts: T2, complete: false }),
+      ],
+      EXPORT_NOW,
+    )
 
     expect(out.split("\n")).toEqual([
       "# Test Title",
-      "Date: 2026-09-29",
+      "Date: 2026-09-30",
       "Session: ses_xyz",
       "",
       "## USER \u2014 23:59:00",
@@ -73,12 +80,14 @@ describe("buildTranscript", () => {
     ])
   })
 
-  it("Date line follows the LAST message (UTC), not the first", () => {
-    const out = buildTranscript("t", "s", [
-      msg({ id: "a", text: "one", ts: Date.UTC(2026, 8, 28, 12, 0, 0) }),
-      msg({ id: "b", text: "two", ts: Date.UTC(2026, 8, 29, 12, 0, 0) }),
-    ])
-    expect(out.split("\n")[1]).toBe("Date: 2026-09-29")
+  it("Date line derives from export-time `now` (V1 parity), not message timestamps", () => {
+    const out = buildTranscript(
+      "t",
+      "s",
+      [msg({ id: "a", text: "one", ts: Date.UTC(2026, 8, 28, 12, 0, 0) })],
+      new Date("2026-10-01T00:00:00Z"),
+    )
+    expect(out.split("\n")[1]).toBe("Date: 2026-10-01")
   })
 
   it("uppercases the role and uses UTC HH:MM:SS from ts", () => {
@@ -94,8 +103,13 @@ describe("buildTranscript", () => {
   })
 
   it("never throws on an empty message list (pipeline skips those, not this fn)", () => {
+    const out = buildTranscript("t", "s", [], EXPORT_NOW)
+    expect(out.split("\n").slice(0, 3)).toEqual(["# t", "Date: 2026-09-30", "Session: s"])
+  })
+
+  it("defaults `now` to the real clock (V1 export time)", () => {
     const out = buildTranscript("t", "s", [])
-    expect(out.split("\n").slice(0, 3)).toEqual(["# t", "Date: ", "Session: s"])
+    expect(out.split("\n")[1]).toMatch(/^Date: \d{4}-\d{2}-\d{2}$/)
   })
 })
 
@@ -126,9 +140,9 @@ describe("exportFileName", () => {
     expect(name.split("_")[2]).toBe("L".repeat(30))
   })
 
-  it("falls back to the first 8 chars of the session id for an empty title", () => {
-    const name = exportFileName(NOW, "", "abcdefgh1234", "x")
-    expect(name).toBe(exportFileName(NOW, "abcdefgh", "abcdefgh1234", "x"))
+  it("falls back to the first 12 chars of the session id for an empty title (V1)", () => {
+    const name = exportFileName(NOW, "", "abcdefgh123456", "x")
+    expect(name).toBe(exportFileName(NOW, "abcdefgh1234", "abcdefgh123456", "x"))
   })
 
   it("is deterministic for identical content and differs when content differs", () => {
@@ -180,5 +194,10 @@ describe("cursorClamp", () => {
 
   it("clamps to min(incompleteTs) - 1 so the reply is revisited next sync", () => {
     expect(cursorClamp([5000, 4000, 6000], 9999)).toBe(3999)
+  })
+
+  it("never exceeds fallbackNow: a clock-skewed future ts cannot push the cursor past now", () => {
+    expect(cursorClamp([20000], 9999)).toBe(9999)
+    expect(cursorClamp([8000, 20000], 9999)).toBe(7999)
   })
 })

@@ -57,17 +57,21 @@ export interface ExportMessage {
  *
  *     {text}
  *
- * Timestamps are UTC (`toISOString()`), exactly like V1. The `Date:` line
- * follows the LAST message (V1 stamped export time, which on idle/exit is
- * the moment right after the newest message; this fn takes no clock — the
- * export date itself lives in the filename via `exportFileName`).
+ * Timestamps are UTC (`toISOString()`). The `Date:` line is V1's
+ * EXPORT-time date: it derives from `now` (V1: `new Date()` at export),
+ * not from message timestamps — Task 10 passes its clock; the default is
+ * the real one.
  *
  * Returns V1's `content`: lines joined and trimmed, NO trailing newline —
  * the caller writes `content + "\n"` and hashes `content` verbatim.
  */
-export function buildTranscript(title: string, sessionId: string, msgs: ExportMessage[]): string {
-  const date = msgs.length > 0 ? new Date(msgs[msgs.length - 1].ts).toISOString().slice(0, 10) : ""
-  const lines: string[] = [`# ${title}`, `Date: ${date}`, `Session: ${sessionId}`, ""]
+export function buildTranscript(
+  title: string,
+  sessionId: string,
+  msgs: ExportMessage[],
+  now: Date = new Date(),
+): string {
+  const lines: string[] = [`# ${title}`, `Date: ${now.toISOString().slice(0, 10)}`, `Session: ${sessionId}`, ""]
   for (const m of msgs) {
     const hhmmss = new Date(m.ts).toISOString().slice(11, 19)
     lines.push(`## ${m.role.toUpperCase()} \u2014 ${hhmmss}`, "", m.text, "")
@@ -79,13 +83,14 @@ export function buildTranscript(title: string, sessionId: string, msgs: ExportMe
  * V1 export filename: `sync_{YYYY-MM-DD}_{label≤30}_{sessionId^8}_{sha256(content)^12}.txt`.
  *
  * The label sanitizes `[^a-zA-Z0-9 _-]` to `_` (spaces SURVIVE here, unlike
- * wing names) and falls back to the first 8 chars of the session id when the
- * title is empty. The content hash makes re-exports of identical content
- * land on the identical filename — naturally idempotent.
+ * wing names) and falls back to the first 12 chars of the session id when
+ * the title is empty (V1); the id segment stays the first 8. The content
+ * hash makes re-exports of identical content land on the identical
+ * filename — naturally idempotent.
  */
 export function exportFileName(now: Date, title: string, sessionId: string, content: string): string {
   const day = now.toISOString().slice(0, 10)
-  const label = (title.replace(/[^a-zA-Z0-9 _-]/g, "_") || sessionId.slice(0, 8)).slice(0, 30)
+  const label = (title.replace(/[^a-zA-Z0-9 _-]/g, "_") || sessionId.slice(0, 12)).slice(0, 30)
   const id8 = sessionId.slice(0, 8)
   const hash12 = createHash("sha256").update(content).digest("hex").slice(0, 12)
   return `sync_${day}_${label}_${id8}_${hash12}.txt`
@@ -104,6 +109,10 @@ export function exportFileName(now: Date, title: string, sessionId: string, cont
  *
  * Whether fewer than 2 exportable messages justify skipping the whole
  * session is the PIPELINE's decision (Review Focus #3), not this filter's.
+ *
+ * The seen∩incomplete edge (id already mined AND complete:false) is
+ * unreachable in practice: mined_ids only ever records completed,
+ * exported messages, so the filter order below never loses a clamp.
  */
 export function filterExportable(
   msgs: ExportMessage[],
@@ -127,8 +136,11 @@ export function filterExportable(
  * Cursor for `markWingSynced` after one wing's export: when anything was
  * skipped as incomplete, clamp to min(incompleteTs) - 1 so the in-flight
  * reply is re-read by the next sync (idle/exit/startup); otherwise the
- * wing may advance to `fallbackNow`.
+ * wing may advance to `fallbackNow`. V1's `Math.min(now, min - 1)` is
+ * kept whole: a clock-skewed future ts can never push the cursor past
+ * `fallbackNow`.
  */
 export function cursorClamp(incompleteTs: number[], fallbackNow: number): number {
-  return incompleteTs.length > 0 ? Math.min(...incompleteTs) - 1 : fallbackNow
+  if (incompleteTs.length === 0) return fallbackNow
+  return Math.min(fallbackNow, Math.min(...incompleteTs) - 1)
 }
