@@ -7,6 +7,9 @@
  *     toasts             (boolean, default true)
  *   ~/.mempalace/identity.txt   palace identity text (missing → "")
  *
+ * Plus the repo's own package.json metadata (name/version) for the startup
+ * toast — same total-parsing discipline: any failure falls back, never throws.
+ *
  * Parsing is total: malformed JSON, wrong types, or a missing file all fall
  * back to the V1 defaults and never throw — a broken config must not crash
  * the host opencode process (Review Focus #2). Fallback is per field, so one
@@ -86,5 +89,40 @@ export function readIdentity(paths: Paths): string {
     return readFileSync(paths.identityFile, "utf8")
   } catch {
     return ""
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin package metadata (startup toast)
+// ---------------------------------------------------------------------------
+
+/** Fallbacks when the repo's package.json is unreadable or malformed. */
+export const PACKAGE_NAME_FALLBACK = "opencode-mempalace"
+export const PACKAGE_VERSION_FALLBACK = "unknown"
+
+/** `package.json` fields the startup toast shows. */
+export interface PackageInfo {
+  name: string
+  version: string
+}
+
+/**
+ * Read `{ name, version }` from a package.json file. Total function: a
+ * missing/unreadable file, malformed JSON, or wrong-typed/empty fields all
+ * fall back per field (name → "opencode-mempalace", version → "unknown").
+ * The toast is cosmetic, so this must never throw into the host process.
+ */
+export function readPackageInfo(file: string): PackageInfo {
+  const fallback: PackageInfo = { name: PACKAGE_NAME_FALLBACK, version: PACKAGE_VERSION_FALLBACK }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"))
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return fallback
+    const obj = parsed as Record<string, unknown>
+    return {
+      name: typeof obj.name === "string" && obj.name !== "" ? obj.name : fallback.name,
+      version: typeof obj.version === "string" && obj.version !== "" ? obj.version : fallback.version,
+    }
+  } catch {
+    return fallback
   }
 }

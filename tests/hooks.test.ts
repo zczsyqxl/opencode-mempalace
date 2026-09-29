@@ -7,6 +7,7 @@ import type { SessionCounter } from "../src/state"
 import {
   BUSY_TOAST_WINDOW_MS,
   makeToastEmitter,
+  startupToastMessage,
 } from "../src/toast"
 import {
   createCheckpointStateMachine,
@@ -290,5 +291,23 @@ describe("makeToastEmitter", () => {
     clock += BUSY_TOAST_WINDOW_MS // window elapsed → next busy notice passes
     toast("info", "MemPalace", "palace busy after window")
     expect(emit).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe("startupToastMessage", () => {
+  it("no pending files → \", queue empty\" suffix", () => {
+    expect(startupToastMessage("opencode-mempalace", "0.0.0", 0)).toBe(
+      "opencode-mempalace v0.0.0 loaded, queue empty",
+    )
+  })
+
+  it("pending files → \", N file(s) waiting to mine\" suffix", () => {
+    expect(startupToastMessage("opencode-mempalace", "1.2.3", 7)).toBe(
+      "opencode-mempalace v1.2.3 loaded, 7 file(s) waiting to mine",
+    )
+  })
+
+  it("negative counts are treated as empty (countPendingFiles floors at 0)", () => {
+    expect(startupToastMessage("x", "9", -1)).toBe("x v9 loaded, queue empty")
   })
 })

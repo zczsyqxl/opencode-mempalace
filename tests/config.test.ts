@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { buildPaths, type Paths } from "../src/paths"
-import { parsePluginConfig, readConfig, readIdentity } from "../src/config"
+import { parsePluginConfig, readConfig, readIdentity, readPackageInfo } from "../src/config"
 
 /** Fresh temp dir per test; never touch the real ~/.mempalace. */
 let tmp = ""
@@ -127,5 +127,36 @@ describe("readIdentity", () => {
     writeFileSync(blocker, "not a directory", "utf8")
     expect(() => readIdentity(buildPaths(blocker))).not.toThrow()
     expect(readIdentity(buildPaths(blocker))).toBe("")
+  })
+})
+
+describe("readPackageInfo", () => {
+  it("reads name and version from a package.json", () => {
+    tmp = mkdtempSync(join(tmpdir(), "mp-config-"))
+    const file = join(tmp, "package.json")
+    writeFileSync(file, JSON.stringify({ name: "opencode-mempalace", version: "1.2.3" }), "utf8")
+    expect(readPackageInfo(file)).toEqual({ name: "opencode-mempalace", version: "1.2.3" })
+  })
+
+  it("falls back per field when values are wrong-typed or empty strings", () => {
+    tmp = mkdtempSync(join(tmpdir(), "mp-config-"))
+    const file = join(tmp, "package.json")
+    writeFileSync(file, JSON.stringify({ name: 42, version: "" }), "utf8")
+    expect(readPackageInfo(file)).toEqual({ name: "opencode-mempalace", version: "unknown" })
+    writeFileSync(file, JSON.stringify({ name: "" }), "utf8")
+    expect(readPackageInfo(file)).toEqual({ name: "opencode-mempalace", version: "unknown" })
+  })
+
+  it("falls back for malformed JSON, non-object JSON, and missing files, never throwing", () => {
+    tmp = mkdtempSync(join(tmpdir(), "mp-config-"))
+    const file = join(tmp, "package.json")
+    writeFileSync(file, "{ broken", "utf8")
+    expect(readPackageInfo(file)).toEqual({ name: "opencode-mempalace", version: "unknown" })
+    writeFileSync(file, "[1,2]", "utf8")
+    expect(readPackageInfo(file)).toEqual({ name: "opencode-mempalace", version: "unknown" })
+    expect(readPackageInfo(join(tmp, "no-such-package.json"))).toEqual({
+      name: "opencode-mempalace",
+      version: "unknown",
+    })
   })
 })

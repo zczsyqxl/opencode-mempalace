@@ -19,15 +19,21 @@
  *   command.transform()         /memory-status + /memory-log read-only views
  *                               (./commands render; results via
  *                               session.synthetic into the transcript)
+ *   skill.transform()           auto-register the vendored recall skill
+ *                               (content read ONCE at setup — transform
+ *                               callbacks must stay cheap and synchronous)
  *   event.subscribe()           session.idle → debounced sync run (./pipeline)
- *   startup timer               one catch-up sync 10s after load
+ *   startup timer               one catch-up sync 10s after load,
+ *                               startup toast 15s after load (V1)
  *
  * Failure discipline (V1): a hook must never break the host model call —
  * every handler is wrapped in try/catch and logs via ./logs.
  */
-import { Plugin } from "@opencode/plugin"
+import { Plugin, type Skill } from "@opencode/plugin"
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import {
   MINE_LOG_TAIL_LINES,
   commandArgs,
@@ -48,7 +54,7 @@ import {
   recallBlock,
   rescueBlock,
 } from "./blocks"
-import { readConfig, readIdentity } from "./config"
+import { readConfig, readIdentity, readPackageInfo } from "./config"
 import {
   TOOL_LOG_ASKED_CHARS,
   TOOL_LOG_ANSWERED_CHARS,
@@ -68,7 +74,7 @@ import { buildPaths } from "./paths"
 import { runSync } from "./pipeline"
 import { MemPalaceUI, type ToastPayload } from "./rpc"
 import { mergeSession, readCounters, readSessions, readSyncState, writeCounters, writeSessions } from "./state"
-import { makeToastEmitter } from "./toast"
+import { makeToastEmitter, startupToastMessage } from "./toast"
 
 /** `mempalace search` budget at the context hook; a recall may never stall the model call. */
 const SEARCH_TIMEOUT_MS = 15_000
@@ -82,6 +88,19 @@ const MINE_TIMEOUT_MS = 30_000
 const IDLE_SYNC_DELAY_MS = 3_000
 /** Startup catch-up (design §7): pick up whatever an interrupted run left behind. */
 const STARTUP_SYNC_DELAY_MS = 10_000
+/** V1 startup toast delay: version + backlog notice once the host is settled. */
+const STARTUP_TOAST_DELAY_MS = 15_000
+
+/**
+ * Repo root resolved from THIS module (`src/` → `..`). Works no matter where
+ * the plugin is loaded from, and keeps the skill/package reads off the
+ * process CWD (which is the host's, not ours).
+ */
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
+/** Vendored recall skill source (V1 content; see skills/mempalace-recall/). */
+const RECALL_SKILL_PATH = join(REPO_ROOT, "skills", "mempalace-recall", "SKILL.md")
+/** This plugin's package.json (name/version for the startup toast). */
+const PACKAGE_JSON_PATH = join(REPO_ROOT, "package.json")
 
 /** Exit signals the save skeleton hooks into (Task 13 fills the body). */
 const EXIT_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "exit"] as const
@@ -115,6 +134,21 @@ export default Plugin.define({
     log.hook(
       `mempalace plugin loaded (saveInterval=${config.saveInterval}, autoInjectContext=${config.autoInjectContext}, toasts=${config.toasts}, bin=${bin ?? "not found"})`,
     )
+
+    // Package metadata for the startup toast (total: falls back, never throws).
+    const pkg = readPackageInfo(PACKAGE_JSON_PATH)
+
+    // Recall skill (V1 content vendored at skills/mempalace-recall/SKILL.md):
+    // read ONCE here, before transform registration — V2 calls transform
+    // callbacks whenever skills are listed/reloaded, so they must stay cheap
+    // and synchronous (no IO inside the callback). A read failure logs an
+    // ERROR and skips registration; the plugin keeps working without the skill.
+    let recallSkillContent: string | null = null
+    try {
+      recallSkillContent = readFileSync(RECALL_SKILL_PATH, "utf8")
+    } catch (err) {
+      log.err(`recall skill not registered — cannot read ${RECALL_SKILL_PATH}: ${String(err)}`)
+    }
 
     const onPrompt = async (event: { sessionID: string; prompt: { text: string }; metadata?: Record<string, unknown> }) => {
       try {
@@ -302,6 +336,26 @@ export default Plugin.define({
       }),
     ]
 
+    // Auto-register the recall skill (design §4: V1's "manually copy the
+    // skill" step becomes skill.transform). Field types carry effect brands
+    // (Skill.ID / Skill.Name / AbsolutePath) that are runtime-transparent;
+    // the casts only satisfy the branded schema types.
+    if (recallSkillContent !== null) {
+      const content = recallSkillContent
+      registrations.push(
+        await ctx.skill.transform((editor) => {
+          editor.add({
+            id: "mempalace-recall" as Skill.Info["id"],
+            name: "MemPalace Recall" as Skill.Info["name"],
+            description: "Question-driven search-before-answer protocol for MemPalace",
+            path: RECALL_SKILL_PATH as Skill.Info["path"],
+            content,
+          })
+        }),
+      )
+      log.debug(`recall skill registered (${RECALL_SKILL_PATH}, ${content.length} chars)`)
+    }
+
     // Sync-engine triggers (Ruling 13): thin wiring only — debounce, locking,
     // export, mining and state all live in ./pipeline. `session.idle` events
     // schedule a run after the V1 3s settle delay; one startup run 10s after
@@ -339,6 +393,12 @@ export default Plugin.define({
     const startupSync = setTimeout(startSync, STARTUP_SYNC_DELAY_MS)
     log.debug("sync triggers armed: session.idle (+3s), startup (+10s)")
 
+    // V1 startup toast (15s): plugin identity + export backlog. Emitted
+    // through the same config-gated emitter, so `toasts:false` stays silent.
+    const startupToast = setTimeout(() => {
+      toast("info", "MemPalace", startupToastMessage(pkg.name, pkg.version, countPendingFiles(paths.syncDir)))
+    }, STARTUP_TOAST_DELAY_MS)
+
     // Exit-save skeleton (Task 13 fills the body); guard against double-fire
     // because several signals can arrive during shutdown.
     let exitDone = false
@@ -354,6 +414,7 @@ export default Plugin.define({
     return async () => {
       idleEvents.abort()
       clearTimeout(startupSync)
+      clearTimeout(startupToast)
       for (const signal of EXIT_SIGNALS) process.removeListener(signal, onExit)
       for (const registration of registrations) await registration.dispose()
       await rpc.dispose()

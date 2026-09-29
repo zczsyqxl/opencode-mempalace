@@ -10,6 +10,10 @@
  *
  * Pure logic + the injected `emit` bridge (the RPC call is wired in index.ts),
  * so the whole gate/throttle behavior is unit-testable without a plugin host.
+ *
+ * startupToastMessage builds the V1 startup toast text (version + backlog
+ * suffix); the 15s timer that fires it lives in index.ts with the plugin
+ * lifetime it belongs to.
  */
 import { readConfig } from "./config"
 import type { Paths } from "./paths"
@@ -20,6 +24,20 @@ export const BUSY_TOAST_WINDOW_MS = 5 * 60 * 1000
 
 /** Busy notices are recognized by this message prefix (info variant only). */
 const BUSY_MESSAGE_PREFIX = "palace busy"
+
+// ---------------------------------------------------------------------------
+// Startup toast message (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * V1 startup toast text: `opencode-mempalace v0.0.0 loaded` plus a backlog
+ * suffix — `, N file(s) waiting to mine` when export files are pending under
+ * the sync workspace, `, queue empty` otherwise.
+ */
+export function startupToastMessage(name: string, version: string, pendingFiles: number): string {
+  const suffix = pendingFiles > 0 ? `, ${pendingFiles} file(s) waiting to mine` : ", queue empty"
+  return `${name} v${version} loaded${suffix}`
+}
 
 /**
  * Build the emitter. `now` is injectable so the busy window is testable
