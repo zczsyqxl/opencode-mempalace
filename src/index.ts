@@ -16,6 +16,8 @@
  *   session.hook("compaction")  pre-compact save instruction + rescue block
  *                               (identity + synchronous `mempalace wake-up`)
  *   tool.hook("execute.after")  toast + ilog for every mempalace tool call
+ *   event.subscribe()           session.idle → debounced sync run (./pipeline)
+ *   startup timer               one catch-up sync 10s after load
  *
  * Failure discipline (V1): a hook must never break the host model call —
  * every handler is wrapped in try/catch and logs via ./logs.
@@ -47,8 +49,10 @@ import {
   type ToolResultLike,
 } from "./hooks"
 import { makeLoggers } from "./logs"
-import { findMempalaceBin, runMempalace, runMempalaceSync, searchArgs, wakeUpArgs } from "./mempalace"
+import { collectCandidates, toExportMessages } from "./discover"
+import { findMempalaceBin, mineArgs, runMempalace, runMempalaceSync, searchArgs, wakeUpArgs } from "./mempalace"
 import { buildPaths } from "./paths"
+import { runSync } from "./pipeline"
 import { MemPalaceUI, type ToastPayload } from "./rpc"
 import { mergeSession, readCounters, readSessions, writeCounters, writeSessions } from "./state"
 import { makeToastEmitter } from "./toast"
@@ -57,6 +61,12 @@ import { makeToastEmitter } from "./toast"
 const SEARCH_TIMEOUT_MS = 15_000
 /** `mempalace wake-up` budget at the compaction hook (V1: synchronous 15s salvage). */
 const WAKEUP_TIMEOUT_MS = 15_000
+/** `mempalace mine` budget per wing (V1 exit-salve value; idle runs are async anyway). */
+const MINE_TIMEOUT_MS = 30_000
+/** V1 idle→sync delay: let the round settle before reading the context. */
+const IDLE_SYNC_DELAY_MS = 3_000
+/** Startup catch-up (design §7): pick up whatever an interrupted run left behind. */
+const STARTUP_SYNC_DELAY_MS = 10_000
 
 /** Exit signals the save skeleton hooks into (Task 13 fills the body). */
 const EXIT_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "exit"] as const
@@ -218,6 +228,43 @@ export default Plugin.define({
       await ctx.tool.hook("execute.after", onToolAfter),
     ]
 
+    // Sync-engine triggers (Ruling 13): thin wiring only — debounce, locking,
+    // export, mining and state all live in ./pipeline. `session.idle` events
+    // schedule a run after the V1 3s settle delay; one startup run 10s after
+    // load catches anything an interrupted previous run left behind.
+    const startSync = (): void => {
+      const backfill = (process.env.OPENCODE_MEMPALACE_BACKFILL ?? "").trim() !== ""
+      void runSync(
+        {
+          readContext: async (sessionID) => toExportMessages(await ctx.session.context({ sessionID })),
+          listCandidates: () => collectCandidates(paths, { backfill }),
+          runMine: async (wingDir, wing) => {
+            if (bin === null) return { ok: false, error: "mempalace CLI not found" }
+            return runMempalace(bin, mineArgs(wingDir, wing), MINE_TIMEOUT_MS)
+          },
+          now: () => Date.now(),
+        },
+        paths,
+        { toast, loggers: log, backfill },
+      )
+    }
+    const scheduleSync = (): void => {
+      setTimeout(startSync, IDLE_SYNC_DELAY_MS)
+    }
+    const idleEvents = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: idleEvents.signal })) {
+          if (event.type !== "session.idle") continue
+          scheduleSync()
+        }
+      } catch {
+        // Aborted at cleanup or the shared stream closed — either way, stop.
+      }
+    })()
+    const startupSync = setTimeout(startSync, STARTUP_SYNC_DELAY_MS)
+    log.debug("sync triggers armed: session.idle (+3s), startup (+10s)")
+
     // Exit-save skeleton (Task 13 fills the body); guard against double-fire
     // because several signals can arrive during shutdown.
     let exitDone = false
@@ -231,6 +278,8 @@ export default Plugin.define({
     log.debug("hooks registered: prompt, context, compaction, execute.after")
 
     return async () => {
+      idleEvents.abort()
+      clearTimeout(startupSync)
       for (const signal of EXIT_SIGNALS) process.removeListener(signal, onExit)
       for (const registration of registrations) await registration.dispose()
       await rpc.dispose()
