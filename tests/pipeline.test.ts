@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -289,6 +289,43 @@ describe("runSync", () => {
     expect(toast.calls).toEqual([])
     expect(readSyncState(paths)).toEqual({ last_sync_ms: 0, wings: {}, mined_ids: {} })
     expect(existsSync(paths.syncDir)).toBe(false)
+  })
+
+  it("salvages leftover wing dirs from dead runs even with no new export this run", async () => {
+    const paths = freshPaths()
+    const toast = fakeToast()
+    // A previous run's export still sits on disk (mine killed / busy-exhausted).
+    const wingDir = join(paths.syncDir, "stalewing")
+    mkdirSync(wingDir, { recursive: true })
+    writeFileSync(join(wingDir, "sync_2026-09-29_old_deadhash.txt"), "# Old session\n", "utf8")
+    const deps = fakeDeps({ candidates: [] })
+    await runSync(deps, paths, opts(paths, toast.fn))
+
+    // Salvage: the leftover dir is mined, cursor banks, dir cleaned.
+    expect(deps.mineCalls).toEqual([{ wingDir, wing: "stalewing" }])
+    const st = readSyncState(paths)
+    expect(st.wings.stalewing).toBe(NOW)
+    expect(Object.keys(st.mined_ids)).toEqual([]) // leftover ids are unknown — nothing to commit
+    expect(existsSync(wingDir)).toBe(false)
+  })
+
+  it("mines a wing's leftovers together with this run's new export in one pass", async () => {
+    const paths = freshPaths()
+    const toast = fakeToast()
+    const wingDir = join(paths.syncDir, "alpha")
+    mkdirSync(wingDir, { recursive: true })
+    writeFileSync(join(wingDir, "sync_2026-09-29_leftover_hash.txt"), "# Leftover\n", "utf8")
+    const deps = fakeDeps({
+      candidates: [{ sessionID: "ses_a", directory: "/p/alpha", title: "Alpha" }],
+      context: { ses_a: [msg({ id: "a1" }), msg({ id: "a2", role: "assistant", ts: 2000 })] },
+    })
+    await runSync(deps, paths, opts(paths, toast.fn))
+
+    // One mine call for the whole dir (leftover + new file), both counted.
+    expect(deps.mineCalls).toEqual([{ wingDir, wing: "alpha" }])
+    expect(toast.calls.some(([, , m]) => m.includes("wing alpha done (1/1)"))).toBe(true)
+    expect(existsSync(wingDir)).toBe(false)
+    expect(readSyncState(paths).mined_ids).toHaveProperty("a1") // new ids still committed
   })
 
   it("one wing's mine error does not stall the other wing (cursor, ids, cleanup)", async () => {

@@ -223,10 +223,24 @@ async function syncOnce(deps: SyncDeps, paths: Paths, opts: SyncOpts, startNowMs
     log.err(`candidate discovery failed: ${String(err)}`)
     return
   }
-  if (candidates.length === 0) return
+  // Salvage sweep (2026-09-30 incident), BEFORE the no-candidates early exit:
+  // wing dirs still holding files with no new export this run (their mine died
+  // with a previous plugin generation, or busy retries exhausted) join the
+  // mining set, and a shared wing dir's older leftovers join this run's file
+  // counts. Mining is directory-level, so every pending file in a wing dir is
+  // filed in one pass; a salvaged wing's message ids are unknown (they died
+  // with the dead run), so its cursor banks at now with no id commit — the
+  // same semantics as the exit rescue.
+  const plans = new Map<string, WingPlan>()
+  for (const wing of pendingWings(paths)) {
+    const plan = planFor(plans, wing, paths)
+    try {
+      plan.files = readdirSync(plan.wingDir).sort().map((f) => join(plan.wingDir, f))
+    } catch {}
+  }
+  if (candidates.length === 0 && plans.size === 0) return
 
   const seen = loadMinedIds(paths)
-  const plans = new Map<string, WingPlan>()
   let incompleteTotal = 0
 
   for (const candidate of candidates) {
