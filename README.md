@@ -79,4 +79,4 @@ npm test          # vitest (249 unit tests)
 npm run typecheck
 ```
 
-Design doc: `docs/superpowers/specs/` · implementation plan: `docs/superpowers/plans/` · integration checklist: `docs/test-checklist.md` (development docs are in Chinese).
+Development records (design spec, implementation plan, integration checklist) are kept locally under `docs/` and are intentionally not part of the repository.
