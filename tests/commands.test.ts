@@ -165,18 +165,35 @@ describe("renderMemoryStatus", () => {
     mined_ids: { a: 1, b: 2, c: 3 },
   }
 
-  it("contains last sync ISO, per-wing cursor ISOs, mined count, pending count", () => {
+  it("shows newest-wing last sync and dedup watermark separately", () => {
     const out = renderMemoryStatus({
       pendingFiles: 2,
       syncState: SYNC_STATE,
       lastMineLog: [],
       palaceStatus: "",
     })
-    expect(out).toContain("2026-09-29T01:02:03.000Z")
+    // newest wing cursor (alpha) drives "last sync"; last_sync_ms (min across wings) drives the watermark
+    expect(out).toContain("- Last sync (newest wing): 2026-09-29T01:02:03.000Z")
+    expect(out).toContain("- Dedup watermark (oldest wing): 2026-09-29T01:02:03.000Z")
     expect(out).toContain("- alpha: 2026-09-29T01:02:03.000Z")
     expect(out).toContain("- beta: 2026-09-28T09:00:00.000Z")
     expect(out).toContain("Mined messages: 3")
     expect(out).toContain("Pending export files: 2")
+  })
+
+  it("diverges when the watermark lags behind the newest wing", () => {
+    const out = renderMemoryStatus({
+      pendingFiles: 0,
+      syncState: {
+        last_sync_ms: Date.UTC(2026, 8, 28, 9, 0, 0),
+        wings: { alpha: Date.UTC(2026, 8, 29, 12, 0, 0) },
+        mined_ids: {},
+      },
+      lastMineLog: [],
+      palaceStatus: "",
+    })
+    expect(out).toContain("- Last sync (newest wing): 2026-09-29T12:00:00.000Z")
+    expect(out).toContain("- Dedup watermark (oldest wing): 2026-09-28T09:00:00.000Z")
   })
 
   it("includes the mine-log tail and the mempalace status output verbatim", () => {

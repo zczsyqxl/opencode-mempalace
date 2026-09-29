@@ -177,8 +177,13 @@ export function renderMemoryStatus(input: MemoryStatusInput): string {
     lines.push(...ls)
   }
 
+  const wingCursorValues = Object.values(st.wings).filter((v) => typeof v === "number")
+  const newestSync = wingCursorValues.length > 0 ? Math.max(...wingCursorValues) : 0
+  const iso = (ms: number): string => (ms > 0 ? new Date(ms).toISOString() : "never")
+
   push("## MemPalace Status", "")
-  push(`- Last sync: ${st.last_sync_ms > 0 ? new Date(st.last_sync_ms).toISOString() : "never"}`)
+  push(`- Last sync (newest wing): ${iso(newestSync)}`)
+  push(`- Dedup watermark (oldest wing): ${iso(st.last_sync_ms)}`)
   push(`- Mined messages: ${Object.keys(st.mined_ids).length}`)
   push(`- Pending export files: ${input.pendingFiles}`)
 
