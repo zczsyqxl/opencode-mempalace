@@ -16,6 +16,9 @@
  *   session.hook("compaction")  pre-compact save instruction + rescue block
  *                               (identity + synchronous `mempalace wake-up`)
  *   tool.hook("execute.after")  toast + ilog for every mempalace tool call
+ *   command.transform()         /memory-status + /memory-log read-only views
+ *                               (./commands render; results via
+ *                               session.synthetic into the transcript)
  *   event.subscribe()           session.idle → debounced sync run (./pipeline)
  *   startup timer               one catch-up sync 10s after load
  *
@@ -25,6 +28,16 @@
 import { Plugin } from "@opencode/plugin"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import {
+  MINE_LOG_TAIL_LINES,
+  commandArgs,
+  countPendingFiles,
+  parseMemoryLogArgs,
+  readLastLines,
+  readLines,
+  renderMemoryLog,
+  renderMemoryStatus,
+} from "./commands"
 import {
   MAX_INJECT_CHARS,
   MAX_SEARCH_RESULTS,
@@ -54,13 +67,15 @@ import { findMempalaceBin, mineArgs, runMempalace, runMempalaceSync, searchArgs,
 import { buildPaths } from "./paths"
 import { runSync } from "./pipeline"
 import { MemPalaceUI, type ToastPayload } from "./rpc"
-import { mergeSession, readCounters, readSessions, writeCounters, writeSessions } from "./state"
+import { mergeSession, readCounters, readSessions, readSyncState, writeCounters, writeSessions } from "./state"
 import { makeToastEmitter } from "./toast"
 
 /** `mempalace search` budget at the context hook; a recall may never stall the model call. */
 const SEARCH_TIMEOUT_MS = 15_000
 /** `mempalace wake-up` budget at the compaction hook (V1: synchronous 15s salvage). */
 const WAKEUP_TIMEOUT_MS = 15_000
+/** `mempalace status` budget at /memory-status (read-only view; "" on failure). */
+const STATUS_TIMEOUT_MS = 15_000
 /** `mempalace mine` budget per wing (V1 exit-salve value; idle runs are async anyway). */
 const MINE_TIMEOUT_MS = 30_000
 /** V1 idle→sync delay: let the round settle before reading the context. */
@@ -226,6 +241,65 @@ export default Plugin.define({
       await ctx.session.hook("context", onContext),
       await ctx.session.hook("compaction", onCompaction),
       await ctx.tool.hook("execute.after", onToolAfter),
+      // /memory-status + /memory-log (Task 11): read-only views assembled in
+      // ./commands and delivered into the transcript via session.synthetic.
+      // Command.execute receives { sessionID, prompt, delivery } where
+      // prompt.text carries the text AFTER the command name (commandArgs
+      // strips a leading "/<name>" token defensively). Every execute is
+      // wrapped: on failure a short error line is synthetized, never thrown.
+      await ctx.command.transform((editor) => {
+        editor.add({
+          name: "memory-status",
+          description: "MemPalace palace health (drawers, cursors, backlog)",
+          execute: async ({ sessionID }) => {
+            try {
+              let palaceStatus = ""
+              if (bin !== null) {
+                try {
+                  const result = runMempalaceSync(bin, ["status"], STATUS_TIMEOUT_MS)
+                  if (result.ok) palaceStatus = result.stdout.trim()
+                } catch {
+                  // CLI hosed → empty section, not a broken view.
+                }
+              }
+              const text = renderMemoryStatus({
+                pendingFiles: countPendingFiles(paths.syncDir),
+                syncState: readSyncState(paths),
+                lastMineLog: readLastLines(paths.hookLog, MINE_LOG_TAIL_LINES),
+                palaceStatus,
+              })
+              log.debug(`memory-status served (session ${sessionID})`)
+              await ctx.session.synthetic({ sessionID, text })
+            } catch (err) {
+              log.err(`memory-status failed: ${String(err)}`)
+              try {
+                await ctx.session.synthetic({ sessionID, text: "MemPalace status unavailable (see hook.log)" })
+              } catch {
+                // Synthetic itself failing: nothing left to do.
+              }
+            }
+          },
+        })
+        editor.add({
+          name: "memory-log",
+          description: "MemPalace interaction history (newest last)",
+          execute: async ({ sessionID, prompt }) => {
+            try {
+              const { n, filter } = parseMemoryLogArgs(commandArgs(prompt.text, "memory-log"))
+              const text = renderMemoryLog(readLines(paths.interactionsLog), n, filter)
+              log.debug(`memory-log served (session ${sessionID}, n=${n}, filter=${filter ?? "none"})`)
+              await ctx.session.synthetic({ sessionID, text })
+            } catch (err) {
+              log.err(`memory-log failed: ${String(err)}`)
+              try {
+                await ctx.session.synthetic({ sessionID, text: "MemPalace log unavailable (see hook.log)" })
+              } catch {
+                // Synthetic itself failing: nothing left to do.
+              }
+            }
+          },
+        })
+      }),
     ]
 
     // Sync-engine triggers (Ruling 13): thin wiring only — debounce, locking,
@@ -275,7 +349,7 @@ export default Plugin.define({
     }
     for (const signal of EXIT_SIGNALS) process.once(signal, onExit)
 
-    log.debug("hooks registered: prompt, context, compaction, execute.after")
+    log.debug("hooks registered: prompt, context, compaction, execute.after; commands: memory-status, memory-log")
 
     return async () => {
       idleEvents.abort()
