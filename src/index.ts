@@ -11,8 +11,8 @@
  *                               arm checkpoints, register the session,
  *                               plan recall (autoInject only)
  *   session.hook("context")     deliver armed checkpoint instructions,
- *                               inject identity (first message) + recall
- *                               search results (autoInject only)
+ *                               inject identity (once per plugin lifetime)
+ *                               + recall search results (autoInject only)
  *   session.hook("compaction")  pre-compact save instruction + rescue block
  *                               (identity + synchronous `mempalace wake-up`)
  *   tool.hook("execute.after")  toast + ilog for every mempalace tool call
@@ -38,6 +38,7 @@ import {
   TOOL_LOG_ASKED_CHARS,
   TOOL_LOG_ANSWERED_CHARS,
   createCheckpointStateMachine,
+  createIdentityLatch,
   createRecallPlanner,
   extractResultText,
   formatToolArgs,
@@ -73,6 +74,11 @@ export default Plugin.define({
       write: (counters) => writeCounters(paths, counters),
     })
     const recall = createRecallPlanner()
+    // V1 `wakeupDone` semantics: the identity block is injected on the FIRST
+    // context hook event of this plugin's lifetime. The agent loop always
+    // assembles a transcript with at least the current user message, so a
+    // messages-length gate would be dead code.
+    const identityLatch = createIdentityLatch()
 
     const rpc = await ctx.rpc.register(MemPalaceUI, {})
     const toast = makeToastEmitter(paths, (payload: ToastPayload) => {
@@ -119,7 +125,7 @@ export default Plugin.define({
       }
     }
 
-    const onContext = async (event: { sessionID: string; system: Array<{ type: "text"; text: string }>; messages: unknown[] }) => {
+    const onContext = async (event: { sessionID: string; system: Array<{ type: "text"; text: string }> }) => {
       try {
         const pending = checkpoints.takePending(event.sessionID)
         if (pending) {
@@ -129,9 +135,10 @@ export default Plugin.define({
 
         if (!config.autoInjectContext) return
 
-        // Identity on the session's first message; skipped when the trimmed
-        // identity is empty (Ruling 8: trim at the block consumer).
-        if (event.messages.length === 0) {
+        // Identity once per plugin lifetime (see identityLatch above), skipped
+        // when the trimmed identity is empty (Ruling 8: trim at the consumer).
+        // Stays before the recall block below.
+        if (identityLatch.shouldInject()) {
           const identity = readIdentity(paths).trim()
           if (identity !== "") event.system.push({ type: "text", text: identityBlock(identity) })
         }
@@ -201,6 +208,11 @@ export default Plugin.define({
 
     const registrations = [
       await ctx.session.hook("prompt", onPrompt),
+      // Scope note (official V2 plugin docs): the "context" hook "runs for
+      // the agent loop, including tool-driven continuations" — title,
+      // compaction, and generate are SEPARATE hook names. Auxiliary requests
+      // therefore cannot reach this handler, so they can never consume the
+      // recall/checkpoint slots; no kind-gating is needed here.
       await ctx.session.hook("context", onContext),
       await ctx.session.hook("compaction", onCompaction),
       await ctx.tool.hook("execute.after", onToolAfter),

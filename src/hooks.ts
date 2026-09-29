@@ -9,6 +9,8 @@
  *     bumpCounter's pre-bump rule (state.ts, single source of truth); the
  *     consumer advances `lastCheckpoint` AT ARMING TIME so later messages in
  *     the same boundary cannot re-arm (V1 semantics, state.ts JSDoc).
+ *   - createIdentityLatch: identity injected once per plugin lifetime (V1
+ *     wakeupDone flag) — see the function doc below.
  *   - createRecallPlanner: one planned recall query at a time; a query
  *     identical to the last planned one is ignored, so the agent loop's
  *     repeated steps (and repeated identical prompts) never re-search.
@@ -77,6 +79,26 @@ export function createCheckpointStateMachine(
       const p = pending
       pending = null
       return p
+    },
+  }
+}
+
+/**
+ * Identity injection latch (V1 `wakeupDone` semantics): the identity block
+ * is injected ONCE per plugin lifetime, on the first context hook event —
+ * the agent-loop transcript always contains at least the current user
+ * message, so a messages-length gate can never fire. shouldInject() returns
+ * true exactly once, false forever after.
+ */
+export function createIdentityLatch(): {
+  shouldInject(): boolean
+} {
+  let fired = false
+  return {
+    shouldInject() {
+      if (fired) return false
+      fired = true
+      return true
     },
   }
 }

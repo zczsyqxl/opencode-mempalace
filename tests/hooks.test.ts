@@ -10,6 +10,7 @@ import {
 } from "../src/toast"
 import {
   createCheckpointStateMachine,
+  createIdentityLatch,
   createRecallPlanner,
   extractResultText,
   formatToolArgs,
@@ -112,6 +113,24 @@ describe("createCheckpointStateMachine", () => {
     for (let i = 1; i <= 100; i++) expect(machine.onPrompt("s").armed).toBe(false)
     expect(store.snapshot()["s"]?.humanMsgs).toBe(100)
     expect(machine.takePending()).toBeNull()
+  })
+})
+
+describe("createIdentityLatch", () => {
+  it("shouldInject() returns true exactly once, then false forever", () => {
+    const latch = createIdentityLatch()
+    expect(latch.shouldInject()).toBe(true)
+    expect(latch.shouldInject()).toBe(false)
+    expect(latch.shouldInject()).toBe(false)
+  })
+
+  it("instances are independent (each fires once)", () => {
+    const a = createIdentityLatch()
+    const b = createIdentityLatch()
+    expect(a.shouldInject()).toBe(true)
+    expect(b.shouldInject()).toBe(true)
+    expect(a.shouldInject()).toBe(false)
+    expect(b.shouldInject()).toBe(false)
   })
 })
 
