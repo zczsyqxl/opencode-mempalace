@@ -21,7 +21,17 @@
  *      matches that prefix).
  *
  * Re-entrancy: `miningLock` rejects concurrent runs outright and a start
- * within SYNC_DEBOUNCE_MS of the previous start is skipped.
+ * within SYNC_DEBOUNCE_MS of the previous start is skipped — except a
+ * BACKFILL run, which always goes through (a forced full export must never
+ * be silently dropped).
+ *
+ * Exit rescue (`runExitSync`, Task 13): a SYNCHRONOUS best-effort salvage of
+ * whatever a failed/busy run left in `oc-sessions/`. Discovery and export
+ * are async (ctx reads), so at exit they are skipped entirely — only the
+ * pending wing dirs are mined, serially, under `planExitWings`'s budget.
+ * The miningLock is deliberately ignored (V1: exit takes ownership) and the
+ * first mine error stops the walk (V1 returned on first error); files of
+ * unmined wings stay on disk for the next startup catch-up sync.
  *
  * Everything is injectable (`deps`) and the whole engine never throws to
  * the host: every stage is wrapped, failures land in the hook log.
@@ -56,7 +66,12 @@ export const SYNC_DEBOUNCE_MS = 5_000
 /** Injected side effects; tests substitute fakes for all of them. */
 export interface SyncDeps {
   readContext(sessionID: string): Promise<ExportMessage[]>
-  listCandidates(): Promise<Candidate[]>
+  /**
+   * Candidate discovery. `backfill` mirrors `opts.backfill` so the discovery
+   * layer can widen its cursor floor to 0 (full history) — the message-level
+   * `mined_ids` dedup is applied by the pipeline either way.
+   */
+  listCandidates(backfill?: boolean): Promise<Candidate[]>
   runMine(wingDir: string, wing: string): Promise<MempalaceResult>
   now(): number
   /** Timer source for busy retries (defaults to setTimeout; fake in tests). */
@@ -73,6 +88,36 @@ export interface SyncOpts {
    * silently skipped (candidate enumeration itself is widened in discover).
    */
   backfill?: boolean
+}
+
+/** Whether the user requested a full-history backfill (V1 `!!` rule: any non-empty value). */
+export function backfillRequested(env: NodeJS.ProcessEnv): boolean {
+  return !!env.OPENCODE_MEMPALACE_BACKFILL
+}
+
+/**
+ * Pure exit-budget walk (V1): hand each wing `min(perWingMs, remaining)`
+ * in order and stop once the budget is spent — wings beyond the budget are
+ * simply absent from the plan (they are logged as covered-next-startup by
+ * the caller). `now` is accepted for V1 call-site symmetry; the walk itself
+ * needs only the budget.
+ */
+export function planExitWings(
+  wings: string[],
+  now: number,
+  budgetMs = 45_000,
+  perWingMs = 30_000,
+): Array<{ wing: string; timeoutMs: number }> {
+  void now
+  const plan: Array<{ wing: string; timeoutMs: number }> = []
+  let remaining = budgetMs
+  for (const wing of wings) {
+    if (remaining <= 0) break
+    const timeoutMs = Math.min(perWingMs, remaining)
+    plan.push({ wing, timeoutMs })
+    remaining -= timeoutMs
+  }
+  return plan
 }
 
 /** Ruling 1: the dedup set is exactly the key set of `mined_ids`. */
@@ -173,7 +218,7 @@ async function syncOnce(deps: SyncDeps, paths: Paths, opts: SyncOpts, startNowMs
 
   let candidates: Candidate[] = []
   try {
-    candidates = await deps.listCandidates()
+    candidates = await deps.listCandidates(opts.backfill === true)
   } catch (err) {
     log.err(`candidate discovery failed: ${String(err)}`)
     return
@@ -286,6 +331,7 @@ export async function runSync(deps: SyncDeps, paths: Paths, opts: SyncOpts): Pro
     if (mining) return
     const nowMs = deps.now()
     if (!opts.backfill && nowMs - lastStartTs < SYNC_DEBOUNCE_MS) return
+    if (opts.backfill) opts.loggers.debug("backfill requested: exporting full history")
     mining = true
     lastStartTs = nowMs
     try {
@@ -296,6 +342,114 @@ export async function runSync(deps: SyncDeps, paths: Paths, opts: SyncOpts): Pro
   } catch (err) {
     try {
       opts.loggers.err(`sync failed: ${String(err)}`)
+    } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Exit rescue (Task 13) — synchronous salvage of pending wing dirs
+// ---------------------------------------------------------------------------
+
+/** Injected side effects of the exit rescue; tests substitute fakes. */
+export interface ExitDeps {
+  /** Synchronous mine (spawnSync-backed in production). */
+  runMineSync(wingDir: string, wing: string, timeoutMs: number): MempalaceResult
+  /** Clock for cursor timestamps (defaults to Date.now). */
+  now?(): number
+}
+
+export interface ExitOpts {
+  loggers: Loggers
+  /** Total wall-clock budget for the whole rescue (default 45s, V1). */
+  budgetMs?: number
+  /** Per-wing mine timeout (default 30s, V1). */
+  perWingMs?: number
+}
+
+/**
+ * Wings with at least one export file waiting under `paths.syncDir`
+ * (leftovers of failed/busy runs), sorted for deterministic planning.
+ * Total: a missing or unreadable workspace yields [].
+ */
+export function pendingWings(paths: Paths): string[] {
+  let entries
+  try {
+    entries = readdirSync(paths.syncDir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const wings: string[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    try {
+      if (readdirSync(join(paths.syncDir, entry.name)).length > 0) wings.push(entry.name)
+    } catch {}
+  }
+  return wings.sort()
+}
+
+/**
+ * Synchronous exit rescue (V1 semantics): mine what a previous run already
+ * exported but failed to mine. No discovery, no export (both need async ctx
+ * reads), no miningLock (exit takes ownership), no busy backoff — one sync
+ * mine call per planned wing under `planExitWings`'s budget; the FIRST
+ * failure stops the walk and every unmined wing's files stay on disk for
+ * the next startup catch-up sync.
+ *
+ * On wing success: cursor to now (clamp≈now — nothing new is read at exit,
+ * so there is no incomplete-clamp input and no new message id to commit),
+ * the retention-shaped `mergeExportedIds` commit, then file cleanup.
+ * Never throws to the exit path.
+ */
+export function runExitSync(deps: ExitDeps, paths: Paths, opts: ExitOpts): void {
+  const log = opts.loggers
+  try {
+    const pending = pendingWings(paths)
+    if (pending.length === 0) {
+      log.debug("exit rescue: nothing pending — clean exit")
+      return
+    }
+
+    const plan = planExitWings(pending, deps.now?.() ?? Date.now(), opts.budgetMs, opts.perWingMs)
+    const planned = new Set(plan.map((p) => p.wing))
+    for (const wing of pending) {
+      if (!planned.has(wing)) log.hook(`exit rescue: wing ${wing} over budget — covered next startup`)
+    }
+    log.hook(`exit rescue: ${plan.length}/${pending.length} pending wing(s): ${plan.map((p) => p.wing).join(", ")}`)
+
+    let state = readSyncState(paths)
+    for (const { wing, timeoutMs } of plan) {
+      const wingDir = join(paths.syncDir, wing)
+      let result: MempalaceResult
+      try {
+        result = deps.runMineSync(wingDir, wing, timeoutMs)
+      } catch (err) {
+        result = { ok: false, error: String(err) }
+      }
+      if (!result.ok) {
+        log.err(`exit rescue: mine failed (${wing}): ${result.error}`)
+        log.hook("exit rescue: stopped — remaining wing(s) covered next startup")
+        return
+      }
+
+      // Commit = cursor + (empty) id merge + cleanup, mirroring syncOnce.
+      const successNow = deps.now?.() ?? Date.now()
+      let next = markWingSynced(state, wing, successNow)
+      next = { ...next, mined_ids: mergeExportedIds(state.mined_ids, new Map([[wing, new Map()]]), successNow) }
+      writeSyncState(paths, next)
+      state = next
+
+      cleanWingDir(wingDir)
+      log.hook(`exit rescue: wing ${wing} mined, cursor ${successNow}`)
+    }
+
+    // Drop the workspace itself when nothing is waiting inside it.
+    try {
+      rmdirSync(paths.syncDir)
+    } catch {}
+  } catch (err) {
+    try {
+      log.err(`exit rescue failed: ${String(err)}`)
     } catch {}
   }
 }

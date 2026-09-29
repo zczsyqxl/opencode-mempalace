@@ -25,6 +25,8 @@
  *   event.subscribe()           session.idle → debounced sync run (./pipeline)
  *   startup timer               one catch-up sync 10s after load,
  *                               startup toast 15s after load (V1)
+ *   exit signals                synchronous rescue of pending wing dirs
+ *                               (./pipeline runExitSync; no discovery/export)
  *
  * Failure discipline (V1): a hook must never break the host model call —
  * every handler is wrapped in try/catch and logs via ./logs.
@@ -71,7 +73,7 @@ import { makeLoggers } from "./logs"
 import { collectCandidates, toExportMessages } from "./discover"
 import { findMempalaceBin, mineArgs, runMempalace, runMempalaceSync, searchArgs, wakeUpArgs } from "./mempalace"
 import { buildPaths } from "./paths"
-import { runSync } from "./pipeline"
+import { runExitSync, runSync, backfillRequested } from "./pipeline"
 import { MemPalaceUI, type ToastPayload } from "./rpc"
 import { mergeSession, readCounters, readSessions, readSyncState, writeCounters, writeSessions } from "./state"
 import { makeToastEmitter, startupToastMessage } from "./toast"
@@ -84,6 +86,8 @@ const WAKEUP_TIMEOUT_MS = 15_000
 const STATUS_TIMEOUT_MS = 15_000
 /** `mempalace mine` budget per wing (V1 exit-salve value; idle runs are async anyway). */
 const MINE_TIMEOUT_MS = 30_000
+/** V1 exit-rescue total budget across all wings (planExitWings default). */
+const EXIT_BUDGET_MS = 45_000
 /** V1 idle→sync delay: let the round settle before reading the context. */
 const IDLE_SYNC_DELAY_MS = 3_000
 /** Startup catch-up (design §7): pick up whatever an interrupted run left behind. */
@@ -102,7 +106,7 @@ const RECALL_SKILL_PATH = join(REPO_ROOT, "skills", "mempalace-recall", "SKILL.m
 /** This plugin's package.json (name/version for the startup toast). */
 const PACKAGE_JSON_PATH = join(REPO_ROOT, "package.json")
 
-/** Exit signals the save skeleton hooks into (Task 13 fills the body). */
+/** Exit signals the synchronous rescue hooks into (SIGINT before exit; see onExit). */
 const EXIT_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "exit"] as const
 
 export default Plugin.define({
@@ -361,11 +365,13 @@ export default Plugin.define({
     // schedule a run after the V1 3s settle delay; one startup run 10s after
     // load catches anything an interrupted previous run left behind.
     const startSync = (): void => {
-      const backfill = (process.env.OPENCODE_MEMPALACE_BACKFILL ?? "").trim() !== ""
+      const backfill = backfillRequested(process.env)
       void runSync(
         {
           readContext: async (sessionID) => toExportMessages(await ctx.session.context({ sessionID })),
-          listCandidates: () => collectCandidates(paths, { backfill }),
+          // runSync forwards its opts.backfill so discovery widens its cursor
+          // floor to 0 exactly when the run is a forced full export.
+          listCandidates: (bf) => collectCandidates(paths, { backfill: bf === true }),
           runMine: async (wingDir, wing) => {
             if (bin === null) return { ok: false, error: "mempalace CLI not found" }
             return runMempalace(bin, mineArgs(wingDir, wing), MINE_TIMEOUT_MS)
@@ -399,13 +405,32 @@ export default Plugin.define({
       toast("info", "MemPalace", startupToastMessage(pkg.name, pkg.version, countPendingFiles(paths.syncDir)))
     }, STARTUP_TOAST_DELAY_MS)
 
-    // Exit-save skeleton (Task 13 fills the body); guard against double-fire
-    // because several signals can arrive during shutdown.
+    // Exit rescue (Task 13): synchronous salvage of whatever a failed/busy
+    // run left in oc-sessions/ — discovery/export need async ctx reads and
+    // are skipped; the miningLock is deliberately ignored (V1: exit takes
+    // ownership). `exitDone` guards double-fire because several signals can
+    // arrive during shutdown.
     let exitDone = false
     const onExit = (): void => {
       if (exitDone) return
       exitDone = true
-      // Task 13: synchronous exit salvage (final mine / state flush) goes here.
+      try {
+        const backfill = backfillRequested(process.env)
+        if (backfill) log.debug("backfill requested at exit: mining pending exports")
+        runExitSync(
+          {
+            runMineSync: (wingDir, wing, timeoutMs) =>
+              bin === null
+                ? { ok: false, error: "mempalace CLI not found" }
+                : runMempalaceSync(bin, mineArgs(wingDir, wing), timeoutMs),
+            now: () => Date.now(),
+          },
+          paths,
+          { loggers: log, budgetMs: EXIT_BUDGET_MS, perWingMs: MINE_TIMEOUT_MS },
+        )
+      } catch (err) {
+        log.err(`exit save failed: ${String(err)}`)
+      }
     }
     for (const signal of EXIT_SIGNALS) process.once(signal, onExit)
 
