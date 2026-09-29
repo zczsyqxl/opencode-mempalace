@@ -1,5 +1,7 @@
 # opencode-mempalace
 
+English | [简体中文](README.zh-CN.md)
+
 A MemPalace plugin for [OpenCode V2](https://opencode.ai/v2/docs/) — a full parity port of [opencode-mempalace-persistence](https://github.com/geco/opencode-mempalace-persistence) (the V1 plugin) to the V2 plugin API. It automatically mines every conversation into your MemPalace palace, injects memories on demand, and periodically prompts the model to file knowledge-graph facts.
 
 Built and battle-tested on Windows (opencode 2.0.19); not yet published to npm.
