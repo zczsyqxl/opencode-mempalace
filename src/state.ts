@@ -9,8 +9,8 @@
  * Parsing is total: garbage on disk yields defaults and never throws — a
  * corrupted state file must not crash the host opencode process. Writes are
  * best-effort for the same reason: if a write fails, the worst case is that
- * the next run re-exports and re-mines idempotently ("少存", never data loss
- * or duplicates).
+ * the next run re-exports and re-mines idempotently (under-archiving, never
+ * data loss or duplicates).
  *
  * mined_ids retention is by AGE (90 days) and COUNT (200k newest) — NEVER by
  * cursor. V1's cursor-based pruning silently dropped IDs whenever a cursor
